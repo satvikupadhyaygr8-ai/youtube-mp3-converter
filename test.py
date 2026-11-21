@@ -3,7 +3,9 @@ import streamlit as st
 import yt_dlp
 import tempfile
 import shutil
+import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 # ---------------- PAGE CONFIG ----------------
 
@@ -20,16 +22,11 @@ st.write("Paste a YouTube video URL and convert its audio into MP3.")
 
 FFMPEG_PATH = shutil.which("ffmpeg")
 
-# Fallback to your known installation path
+# Optional custom FFmpeg path
 if not FFMPEG_PATH:
-    fallback = Path(r"C:\ffmpeg\bin\ffmpeg.exe")
-    if fallback.is_file():
-        FFMPEG_PATH = str(fallback)
-
-if FFMPEG_PATH:
-    FFMPEG_DIR = str(Path(FFMPEG_PATH).parent)
-else:
-    FFMPEG_DIR = None
+    custom_path = os.environ.get("FFMPEG_PATH")
+    if custom_path and Path(custom_path).is_file():
+        FFMPEG_PATH = custom_path
 
 # ---------------- USER INPUT ----------------
 
@@ -44,6 +41,27 @@ quality = st.selectbox(
     index=1
 )
 
+# ---------------- URL VALIDATION ----------------
+
+def valid_youtube_url(url):
+    try:
+        parsed = urlparse(url.strip())
+        domain = parsed.netloc.lower().split(":")[0]
+
+        return (
+            parsed.scheme in ("http", "https")
+            and domain in (
+                "youtube.com",
+                "www.youtube.com",
+                "m.youtube.com",
+                "youtu.be",
+                "www.youtu.be"
+            )
+        )
+    except Exception:
+        return False
+
+
 # ---------------- CONVERSION ----------------
 
 if st.button("Convert to MP3", type="primary"):
@@ -52,8 +70,15 @@ if st.button("Convert to MP3", type="primary"):
         st.warning("Please enter a YouTube URL.")
         st.stop()
 
-    if not FFMPEG_DIR:
-        st.error("FFmpeg not found. Please check installation.")
+    if not valid_youtube_url(youtube_url):
+        st.error("Please enter a valid YouTube URL.")
+        st.stop()
+
+    if not FFMPEG_PATH:
+        st.error(
+            "FFmpeg not found. Please install FFmpeg "
+            "using packages.txt on Streamlit Cloud."
+        )
         st.stop()
 
     try:
@@ -63,11 +88,27 @@ if st.button("Convert to MP3", type="primary"):
 
             options = {
                 "format": "bestaudio/best",
-                "outtmpl": str(temp_dir / "audio.%(ext)s"),
-                "ffmpeg_location": FFMPEG_DIR,
+
+                "outtmpl": str(
+                    temp_dir / "audio.%(ext)s"
+                ),
+
+                "ffmpeg_location": FFMPEG_PATH,
+
                 "noplaylist": True,
+
                 "quiet": True,
                 "no_warnings": True,
+
+                # Prefer IPv4 if IPv6 routing is problematic
+                "force_ipv4": True,
+
+                # YouTube extraction configuration
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "web"]
+                    }
+                },
 
                 "postprocessors": [
                     {
@@ -89,11 +130,16 @@ if st.button("Convert to MP3", type="primary"):
                         download=True
                     )
 
-                output_file = temp_dir / "audio.mp3"
+                # Locate generated MP3
+                output_files = list(
+                    temp_dir.glob("*.mp3")
+                )
 
-                if not output_file.exists():
+                if not output_files:
                     st.error("MP3 file was not generated.")
                     st.stop()
+
+                output_file = output_files[0]
 
                 audio_data = output_file.read_bytes()
 
@@ -109,10 +155,13 @@ if st.button("Convert to MP3", type="primary"):
             st.subheader("Conversion Details")
 
             st.write(f"**Video:** {video_title}")
-            st.write(f"**Format:** MP3")
+            st.write("**Format:** MP3")
             st.write(f"**Bitrate:** {quality} kbps")
+
+            file_size = len(audio_data) / (1024 * 1024)
+
             st.write(
-                f"**File size:** {len(audio_data) / (1024 * 1024):.2f} MB"
+                f"**File size:** {file_size:.2f} MB"
             )
 
             st.download_button(
@@ -123,7 +172,25 @@ if st.button("Convert to MP3", type="primary"):
                 type="primary"
             )
 
+    except yt_dlp.utils.DownloadError as error:
+
+        st.error(
+            "YouTube refused the download request (or "
+            "the video is unavailable)."
+        )
+
+        st.info(
+            "HTTP 403 can indicate a YouTube restriction "
+            "on the hosting server. Updating yt-dlp may "
+            "help, but cannot guarantee a fix."
+        )
+
+        with st.expander("Technical error details"):
+            st.code(str(error))
+
     except Exception as error:
 
         st.error("Conversion failed!")
-        st.exception(error)
+
+        with st.expander("Technical error details"):
+            st.exception(error)
